@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:hyper_local_employee/Pages/candidatedetailspage.dart';
 import 'package:hyper_local_employee/Pages/employeeinterviewschedulepage.dart';
 import 'package:hyper_local_employee/utils/app-colorpage.dart';
 
@@ -505,13 +506,24 @@ class _EmployeeApplicationDetailsPageState
             Expanded(
               child: ElevatedButton(
                 onPressed: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) =>
-                          const EmployeeInterviewSchedulePage(),
-                    ),
-                  );
+                  final appId = widget.application?['application_id'] ??
+                      widget.application?['id'];
+                  final parsedId = appId != null ? int.tryParse(appId.toString()) : null;
+                  if (parsedId != null) {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => CandidateDetailsPage(applicationId: parsedId),
+                      ),
+                    );
+                  } else {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => const EmployeeInterviewSchedulePage(),
+                      ),
+                    );
+                  }
                 },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: AppColors.primary,

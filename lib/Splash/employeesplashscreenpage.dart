@@ -6,7 +6,8 @@ class EmployeeSplashScreenPage extends StatefulWidget {
   const EmployeeSplashScreenPage({super.key});
 
   @override
-  State<EmployeeSplashScreenPage> createState() => _EmployeeSplashScreenPageState();
+  State<EmployeeSplashScreenPage> createState() =>
+      _EmployeeSplashScreenPageState();
 }
 
 class _EmployeeSplashScreenPageState extends State<EmployeeSplashScreenPage>
@@ -66,7 +67,9 @@ class _EmployeeSplashScreenPageState extends State<EmployeeSplashScreenPage>
       if (mounted) {
         Navigator.pushReplacement(
           context,
-          MaterialPageRoute(builder: (_) => const EmployeeOnboardingScreenPage()),
+          MaterialPageRoute(
+            builder: (_) => const EmployeeOnboardingScreenPage(),
+          ),
         );
       }
     });
@@ -86,9 +89,7 @@ class _EmployeeSplashScreenPageState extends State<EmployeeSplashScreenPage>
       body: Container(
         width: double.infinity,
         height: double.infinity,
-        decoration: const BoxDecoration(
-          gradient: AppColors.mainGradient,
-        ),
+        decoration: const BoxDecoration(gradient: AppColors.mainGradient),
         child: SafeArea(
           child: Column(
             children: [
@@ -116,7 +117,8 @@ class _EmployeeSplashScreenPageState extends State<EmployeeSplashScreenPage>
                                       size: const Size(220, 220),
                                       painter: _RipplePainter(
                                         progress: _rippleController.value,
-                                        color: AppColors.primaryLight.withOpacity(0.4),
+                                        color: AppColors.primaryLight
+                                            .withOpacity(0.4),
                                       ),
                                     );
                                   },
@@ -131,7 +133,8 @@ class _EmployeeSplashScreenPageState extends State<EmployeeSplashScreenPage>
                                       color: AppColors.background,
                                       boxShadow: [
                                         BoxShadow(
-                                          color: AppColors.primaryLight.withOpacity(0.25),
+                                          color: AppColors.primaryLight
+                                              .withOpacity(0.25),
                                           blurRadius: 30,
                                           spreadRadius: 8,
                                         ),
@@ -139,7 +142,8 @@ class _EmployeeSplashScreenPageState extends State<EmployeeSplashScreenPage>
                                     ),
                                     padding: const EdgeInsets.all(20),
                                     child: Icon(
-                                      Icons.bolt_rounded, // Replace with logo asset if needed
+                                      Icons
+                                          .bolt_rounded, // Replace with logo asset if needed
                                       size: 65,
                                       color: AppColors.primaryDark,
                                     ),
@@ -150,14 +154,19 @@ class _EmployeeSplashScreenPageState extends State<EmployeeSplashScreenPage>
                           ),
                           const SizedBox(height: 20),
                           // Logo Text
-                          Text(
-                            'Hyper Local',
-                            style: TextStyle(
-                              color: const Color.fromARGB(255, 237, 240, 242),
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                              letterSpacing: 1.5,
-                            ),
+                          // Text(
+                          //   '',
+                          //   // style: TextStyle(
+                          //   //   color: const Color.fromARGB(255, 237, 240, 242),
+                          //   //   fontSize: 16,
+                          //   //   fontWeight: FontWeight.bold,
+                          //   //   letterSpacing: 1.5,
+                          //   // ),
+                          // ),
+                          Image.asset(
+                            'assets/images/new_splash_logo.png',
+                            width: 150,
+                            fit: BoxFit.contain,
                           ),
                         ],
                       ),

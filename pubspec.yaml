@@ -3,7 +3,7 @@ description: "A new Flutter project."
 
 publish_to: 'none'
 
-version: 1.0.0+1
+version: 1.0.0+5
 
 environment:
   sdk: ^3.11.4
@@ -15,6 +15,11 @@ dependencies:
   cupertino_icons: ^1.0.8
   google_fonts: ^6.2.1
   smooth_page_indicator: ^1.2.0+3
+  http: ^1.6.0
+  shared_preferences: ^2.5.5
+  url_launcher: ^6.3.0
+  image_picker: ^1.2.4
+  file_picker: ^13.1.0
 
 dev_dependencies:
   flutter_test:
@@ -25,7 +30,9 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
+    - assets/images/
     - assets/images/hihr.png
     - assets/images/hi_logo.png
     - assets/images/hihrr.png
     - assets/images/new_splash_logo.png
+    - assets/images/new_onboarding_logo.png

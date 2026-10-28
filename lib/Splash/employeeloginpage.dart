@@ -5,6 +5,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:hyper_local_employee/Pages/employeehomepage.dart';
 import 'package:hyper_local_employee/Splash/employeesignuppage.dart';
 import 'package:hyper_local_employee/utils/app-colorpage.dart';
+import '../controllers/login_controller.dart';
 
 class EmployeeLoginPage extends StatefulWidget {
   const EmployeeLoginPage({super.key});
@@ -17,6 +18,9 @@ class _EmployeeLoginPageState extends State<EmployeeLoginPage> with TickerProvid
   final _mobileController = TextEditingController();
   final _mobileFocus = FocusNode();
   bool _mobileFocused = false;
+
+  final LoginController _loginController = LoginController();
+  bool _isLoading = false;
 
   // ── OTP STATE ───────────────────────────────────────────
   bool _otpSent = false; // false = show mobile field, true = show OTP boxes
@@ -92,50 +96,130 @@ class _EmployeeLoginPageState extends State<EmployeeLoginPage> with TickerProvid
   }
 
   // ── SEND OTP HANDLER ───────────────────────────────────────
-  void _handleSendOtp() {
-    final cleanPhone = _mobileController.text.replaceAll(' ', '');
+  Future<void> _handleSendOtp() async {
+    if (_isLoading) return;
+    final cleanPhone = _mobileController.text.replaceAll(' ', '').trim();
     if (cleanPhone.length != 10) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Please enter a valid 10-digit mobile number'),
+          backgroundColor: AppColors.error,
         ),
       );
       return;
     }
 
-    // TODO: call your send-OTP API here
+    setState(() => _isLoading = true);
 
-    setState(() => _otpSent = true);
+    final success = await _loginController.requestOtp(cleanPhone);
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      FocusScope.of(context).requestFocus(_otpFocusNodes[0]);
-    });
+    if (!mounted) return;
+    setState(() => _isLoading = false);
+
+    if (success) {
+      setState(() => _otpSent = true);
+
+      // Clear any previous OTP entries so user enters manually
+      for (final c in _otpControllers) {
+        c.clear();
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_loginController.message.isNotEmpty
+              ? _loginController.message
+              : 'OTP sent successfully!'),
+          backgroundColor: AppColors.success,
+        ),
+      );
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _otpFocusNodes.isNotEmpty) {
+          FocusScope.of(context).requestFocus(_otpFocusNodes[0]);
+        }
+      });
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_loginController.message.isNotEmpty
+              ? _loginController.message
+              : 'Failed to send OTP'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+    }
   }
 
   // ── VERIFY OTP + LOGIN HANDLER ─────────────────────────────
-  void _handleVerifyOtp() {
-    final otp = _otpControllers.map((c) => c.text).join();
+  Future<void> _handleVerifyOtp() async {
+    if (_isLoading) return;
+    final cleanPhone = _mobileController.text.replaceAll(' ', '').trim();
+    final otp = _otpControllers.map((c) => c.text.trim()).join();
 
     if (otp.length != _otpLength) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter the complete 6-digit OTP')),
+        const SnackBar(
+          content: Text('Please enter the complete 6-digit OTP'),
+          backgroundColor: AppColors.error,
+        ),
       );
       return;
     }
 
-    // TODO: call your verify-OTP API here
+    setState(() => _isLoading = true);
 
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (context) => const EmployeeHomePage()),
-    );
+    final success = await _loginController.verifyOtp(cleanPhone, otp);
+
+    if (!mounted) return;
+    setState(() => _isLoading = false);
+
+    if (success) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Login successful! Welcome back.'),
+          backgroundColor: AppColors.success,
+        ),
+      );
+
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (context) => const EmployeeHomePage()),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_loginController.message.isNotEmpty
+              ? _loginController.message
+              : 'Invalid OTP. Please try again.'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+    }
   }
 
   // ── RESEND OTP ──────────────────────────────────────────────
-  void _handleResendOtp() {
-    // TODO: call your resend-OTP API here
+  Future<void> _handleResendOtp() async {
+    if (_isLoading) return;
+    setState(() => _isLoading = true);
+
+    final success = await _loginController.resendOtp();
+
+    if (!mounted) return;
+    setState(() => _isLoading = false);
+
+    if (success) {
+      for (final c in _otpControllers) {
+        c.clear();
+      }
+    }
+
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('OTP resent')),
+      SnackBar(
+        content: Text(_loginController.message.isNotEmpty
+            ? _loginController.message
+            : (success ? 'OTP resent successfully!' : 'Failed to resend OTP')),
+        backgroundColor: success ? AppColors.success : AppColors.error,
+      ),
     );
   }
 
@@ -320,31 +404,59 @@ class _EmployeeLoginPageState extends State<EmployeeLoginPage> with TickerProvid
 
                         // OTP Boxes (only after OTP is sent)
                         if (_otpSent) ...[
-                          RichText(
-                            text: TextSpan(
-                              text: 'OTP sent to ',
-                              style: GoogleFonts.poppins(
-                                color: AppColors.textSecondary,
-                                fontSize: 13,
-                                fontWeight: FontWeight.w400,
-                              ),
-                              children: [
-                                TextSpan(
-                                  text: () {
-                                    final phone = _mobileController.text.replaceAll(' ', '');
-                                    final masked = phone.length >= 10
-                                        ? '${phone.substring(0, 2)}******${phone.substring(8)}'
-                                        : phone;
-                                    return '+91 $masked';
-                                  }(),
-                                  style: GoogleFonts.poppins(
-                                    color: AppColors.textPrimary,
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w600,
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Expanded(
+                                child: RichText(
+                                  text: TextSpan(
+                                    text: 'OTP sent to ',
+                                    style: GoogleFonts.poppins(
+                                      color: AppColors.textSecondary,
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w400,
+                                    ),
+                                    children: [
+                                      TextSpan(
+                                        text: () {
+                                          final phone = _mobileController.text.replaceAll(' ', '');
+                                          final masked = phone.length >= 10
+                                              ? '${phone.substring(0, 2)}******${phone.substring(8)}'
+                                              : phone;
+                                          return '+91 $masked';
+                                        }(),
+                                        style: GoogleFonts.poppins(
+                                          color: AppColors.textPrimary,
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
-                              ],
-                            ),
+                              ),
+                              GestureDetector(
+                                onTap: _isLoading
+                                    ? null
+                                    : () {
+                                        setState(() {
+                                          _otpSent = false;
+                                          for (final c in _otpControllers) {
+                                            c.clear();
+                                          }
+                                        });
+                                      },
+                                child: Text(
+                                  'Change',
+                                  style: GoogleFonts.poppins(
+                                    color: AppColors.primary,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    decoration: TextDecoration.underline,
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                           const SizedBox(height: 14),
                           _buildOtpBoxes(),
@@ -353,7 +465,7 @@ class _EmployeeLoginPageState extends State<EmployeeLoginPage> with TickerProvid
                             mainAxisAlignment: MainAxisAlignment.end,
                             children: [
                               GestureDetector(
-                                onTap: _handleResendOtp,
+                                onTap: _isLoading ? null : _handleResendOtp,
                                 child: Text(
                                   'Resend OTP',
                                   style: GoogleFonts.poppins(
@@ -370,7 +482,7 @@ class _EmployeeLoginPageState extends State<EmployeeLoginPage> with TickerProvid
 
                         // Send OTP / Verify Button
                         GestureDetector(
-                          onTap: _otpSent ? _handleVerifyOtp : _handleSendOtp,
+                          onTap: _isLoading ? null : (_otpSent ? _handleVerifyOtp : _handleSendOtp),
                           child: Container(
                             height: 52,
                             width: double.infinity,
@@ -392,26 +504,37 @@ class _EmployeeLoginPageState extends State<EmployeeLoginPage> with TickerProvid
                                 ),
                               ],
                             ),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Text(
-                                  _otpSent ? 'VERIFY & LOGIN' : 'SEND OTP',
-                                  style: GoogleFonts.poppins(
-                                    color: AppColors.buttonText,
-                                    fontSize: 15,
-                                    fontWeight: FontWeight.bold,
-                                    letterSpacing: 1.2,
+                            child: _isLoading
+                                ? const Center(
+                                    child: SizedBox(
+                                      width: 24,
+                                      height: 24,
+                                      child: CircularProgressIndicator(
+                                        color: AppColors.buttonText,
+                                        strokeWidth: 2.5,
+                                      ),
+                                    ),
+                                  )
+                                : Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Text(
+                                        _otpSent ? 'VERIFY & LOGIN' : 'SEND OTP',
+                                        style: GoogleFonts.poppins(
+                                          color: AppColors.buttonText,
+                                          fontSize: 15,
+                                          fontWeight: FontWeight.bold,
+                                          letterSpacing: 1.2,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      const Icon(
+                                        Icons.arrow_forward_rounded,
+                                        color: AppColors.buttonText,
+                                        size: 18,
+                                      ),
+                                    ],
                                   ),
-                                ),
-                                const SizedBox(width: 8),
-                                const Icon(
-                                  Icons.arrow_forward_rounded,
-                                  color: AppColors.buttonText,
-                                  size: 18,
-                                ),
-                              ],
-                            ),
                           ),
                         ),
 

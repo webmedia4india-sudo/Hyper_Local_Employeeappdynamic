@@ -1,5 +1,8 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:hyper_local_employee/Pages/otpsignuppage.dart';
+import 'package:hyper_local_employee/controllers/signup_controller.dart';
+import 'package:hyper_local_employee/services/api_service.dart';
 import 'package:hyper_local_employee/utils/app-colorpage.dart';
 
 class EmployeeSignUpPage extends StatefulWidget {
@@ -15,25 +18,190 @@ class _EmployeeSignUpPageState extends State<EmployeeSignUpPage> {
   final TextEditingController _nameController = TextEditingController();
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _phoneController = TextEditingController();
+  final TextEditingController _businessNameController = TextEditingController();
+  final TextEditingController _establishmentYearController = TextEditingController();
 
+  final SignupController _signupController = SignupController();
+  bool _isLoading = false;
   bool _agreeToTerms = false;
+
+  String? _selectedIndustry;
+  List<String> _industryOptions = [];
+  bool _isLoadingIndustries = true;
+  bool _isIndustryError = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadIndustries();
+  }
+
+  Future<void> _loadIndustries() async {
+    setState(() {
+      _isLoadingIndustries = true;
+      _isIndustryError = false;
+    });
+    try {
+      final industries = await ApiService.fetchIndustries();
+      if (!mounted) return;
+      if (industries.isEmpty) {
+        setState(() {
+          _industryOptions = [];
+          _isLoadingIndustries = false;
+          _isIndustryError = true;
+        });
+      } else {
+        setState(() {
+          _industryOptions = industries;
+          _isLoadingIndustries = false;
+          _isIndustryError = false;
+          if (_selectedIndustry != null && !_industryOptions.contains(_selectedIndustry)) {
+            _selectedIndustry = null;
+          }
+        });
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _industryOptions = [];
+        _isLoadingIndustries = false;
+        _isIndustryError = true;
+      });
+    }
+  }
 
   @override
   void dispose() {
     _nameController.dispose();
     _emailController.dispose();
     _phoneController.dispose();
+    _businessNameController.dispose();
+    _establishmentYearController.dispose();
     super.dispose();
   }
 
-  void _handleSignUp() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text("Account created successfully!"),
-        backgroundColor: AppColors.success,
-      ),
+  Future<void> _handleSignUp() async {
+    if (_isLoading) return;
+
+    final name = _nameController.text.trim();
+    final email = _emailController.text.trim();
+    final phone = _phoneController.text.replaceAll(' ', '').trim();
+    final businessName = _businessNameController.text.trim();
+    final establishmentYear = _establishmentYearController.text.trim();
+
+    if (_selectedIndustry == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Please select your industry"),
+          backgroundColor: AppColors.error,
+        ),
+      );
+      return;
+    }
+
+    if (businessName.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Please enter your business/company name"),
+          backgroundColor: AppColors.error,
+        ),
+      );
+      return;
+    }
+
+    if (name.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Please enter your full name"),
+          backgroundColor: AppColors.error,
+        ),
+      );
+      return;
+    }
+
+    if (establishmentYear.isEmpty || establishmentYear.length != 4) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Please enter a valid establishment year"),
+          backgroundColor: AppColors.error,
+        ),
+      );
+      return;
+    }
+
+    if (email.isEmpty || !RegExp(r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$').hasMatch(email)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Please enter a valid email address"),
+          backgroundColor: AppColors.error,
+        ),
+      );
+      return;
+    }
+
+    if (phone.length != 10) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Please enter a valid 10-digit phone number"),
+          backgroundColor: AppColors.error,
+        ),
+      );
+      return;
+    }
+
+    if (!_agreeToTerms) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Please agree to the Terms & Conditions and Privacy Policy"),
+          backgroundColor: AppColors.error,
+        ),
+      );
+      return;
+    }
+
+    setState(() => _isLoading = true);
+
+    final success = await _signupController.signup(
+      fullName: name,
+      email: email,
+      phone: phone,
+      industry: _selectedIndustry!,
+      businessName: businessName,
+      establishmentYear: establishmentYear,
     );
-    Navigator.pop(context);
+
+    if (!mounted) return;
+    setState(() => _isLoading = false);
+
+    if (success) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_signupController.message.isNotEmpty
+              ? _signupController.message
+              : "OTP sent successfully!"),
+          backgroundColor: AppColors.success,
+        ),
+      );
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => OtpSignUpPage(
+            phoneNumber: phone,
+            employeeId: _signupController.employeeId ?? 0,
+            signupController: _signupController,
+          ),
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_signupController.message.isNotEmpty
+              ? _signupController.message
+              : "Signup failed. Please try again."),
+          backgroundColor: AppColors.error,
+        ),
+      );
+    }
   }
 
   // ── TERMS & CONDITIONS POPUP ───────────────────────────────
@@ -186,15 +354,15 @@ By tapping "Read and Understand 👍", you acknowledge that you have read and un
                   padding: const EdgeInsets.only(top: 16, bottom: 28),
                   child: Center(
                     child: Image.asset(
-                      'assets/images/hihrr.png',
-                      height: 60,
-                      width: 60,
+                      'assets/images/new_onboarding_logo.png',
+                      height: 80,
+                      width: 80,
                     ),
                   ),
                 ),
 
                 const Text(
-                  "Create Account",
+                  "I'm an Employer",
                   style: TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.bold,
@@ -203,36 +371,64 @@ By tapping "Read and Understand 👍", you acknowledge that you have read and un
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  "Sign up to get started with your account",
+                  "Create your account and hire top talent",
                   style: TextStyle(
                     fontSize: 14,
                     color: AppColors.textSecondary,
                   ),
                 ),
                 const SizedBox(height: 28),
-                 _buildLabel("Full Name"),
+
+                // Industry
+                _buildLabel("Select Industry"),
+                _buildIndustryDropdown(),
+                const SizedBox(height: 18),
+
+                // Business Name
+                _buildLabel("Business Name"),
+                _buildTextField(
+                  controller: _businessNameController,
+                  hint: "Enter business/company name",
+                  icon: Icons.storefront_outlined,
+                ),
+                const SizedBox(height: 18),
+
+                // Full Name
+                _buildLabel("Full Name"),
                 _buildTextField(
                   controller: _nameController,
-                  hint: "Enter your full name",
+                  hint: "Enter contact person's full name",
                   icon: Icons.person_outline,
                 ),
                 const SizedBox(height: 18),
 
-                _buildLabel("Email"),
+                // Establishment Year
+                _buildLabel("Establishment Year"),
                 _buildTextField(
-                  controller: _emailController,
-                  hint: "Enter your email",
-                  icon: Icons.email_outlined,
-                  keyboardType: TextInputType.emailAddress,
+                  controller: _establishmentYearController,
+                  hint: "e.g. 2018",
+                  icon: Icons.calendar_today_outlined,
+                  keyboardType: TextInputType.number,
                 ),
                 const SizedBox(height: 18),
 
-                _buildLabel("Phone Number"),
+                // Phone
+                _buildLabel("Mobile Number"),
                 _buildTextField(
                   controller: _phoneController,
-                  hint: "Enter your phone number",
+                  hint: "Enter 10-digit mobile number",
                   icon: Icons.phone_outlined,
                   keyboardType: TextInputType.phone,
+                ),
+                const SizedBox(height: 18),
+
+                // Email
+                _buildLabel("Email Address"),
+                _buildTextField(
+                  controller: _emailController,
+                  hint: "Enter business email address",
+                  icon: Icons.email_outlined,
+                  keyboardType: TextInputType.emailAddress,
                 ),
                 const SizedBox(height: 20),
 
@@ -297,7 +493,7 @@ By tapping "Read and Understand 👍", you acknowledge that you have read and un
                   width: double.infinity,
                   height: 52,
                   child: ElevatedButton(
-                    onPressed: _handleSignUp,
+                    onPressed: _isLoading ? null : _handleSignUp,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: AppColors.buttonPrimary,
                       foregroundColor: AppColors.buttonText,
@@ -306,23 +502,34 @@ By tapping "Read and Understand 👍", you acknowledge that you have read and un
                         borderRadius: BorderRadius.circular(12),
                       ),
                     ),
-                    child: const Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Text(
-                          "Sign Up",
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
+                    child: _isLoading
+                        ? const Center(
+                            child: SizedBox(
+                              width: 24,
+                              height: 24,
+                              child: CircularProgressIndicator(
+                                color: AppColors.buttonText,
+                                strokeWidth: 2.5,
+                              ),
+                            ),
+                          )
+                        : const Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Text(
+                                "Sign Up",
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              SizedBox(width: 8),
+                              Icon(
+                                Icons.arrow_forward_rounded,
+                                size: 18,
+                              ),
+                            ],
                           ),
-                        ),
-                        SizedBox(width: 8),
-                        Icon(
-                          Icons.arrow_forward_rounded,
-                          size: 18,
-                        ),
-                      ],
-                    ),
                   ),
                 ),
                 const SizedBox(height: 32),
@@ -419,6 +626,104 @@ By tapping "Read and Understand 👍", you acknowledge that you have read and un
           borderSide: const BorderSide(color: AppColors.error, width: 1.5),
         ),
       ),
+    );
+  }
+
+  Widget _buildIndustryDropdown() {
+    if (_isLoadingIndustries) {
+      return Container(
+        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+        decoration: BoxDecoration(
+          color: AppColors.background,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: AppColors.border),
+        ),
+        child: const Row(
+          children: [
+            SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.primary),
+            ),
+            SizedBox(width: 12),
+            Text(
+              "Loading industries...",
+              style: TextStyle(fontSize: 14, color: AppColors.textHint),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (_isIndustryError || _industryOptions.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+        decoration: BoxDecoration(
+          color: AppColors.background,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: AppColors.error),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Expanded(
+              child: Text(
+                "Failed to load industries",
+                style: TextStyle(fontSize: 13, color: AppColors.error),
+              ),
+            ),
+            TextButton(
+              onPressed: _loadIndustries,
+              style: TextButton.styleFrom(
+                padding: EdgeInsets.zero,
+                minimumSize: const Size(50, 30),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: const Text(
+                "Retry",
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: AppColors.primary),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return DropdownButtonFormField<String>(
+      initialValue: _selectedIndustry,
+      style: const TextStyle(fontSize: 14, color: AppColors.textPrimary),
+      icon: const Icon(
+        Icons.keyboard_arrow_down_rounded,
+        color: AppColors.textHint,
+      ),
+      decoration: InputDecoration(
+        hintText: "Choose Industry",
+        hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 14),
+        filled: true,
+        fillColor: AppColors.background,
+        contentPadding:
+            const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: AppColors.border),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: AppColors.border),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: AppColors.primary, width: 1.5),
+        ),
+      ),
+      items: _industryOptions.map((industry) {
+        return DropdownMenuItem<String>(value: industry, child: Text(industry));
+      }).toList(),
+      onChanged: (value) {
+        setState(() {
+          _selectedIndustry = value;
+        });
+      },
     );
   }
 }

@@ -2,7 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:hyper_local_employee/utils/app-colorpage.dart';
 import 'Splash/employeesplashscreenpage.dart';
 
-void main() {
+import 'services/user_session.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await UserSession.init();
   runApp(const MyApp());
 }
 

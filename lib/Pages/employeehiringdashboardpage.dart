@@ -1,5 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:hyper_local_employee/utils/app-colorpage.dart'; // update to your actual AppColors import path
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:hyper_local_employee/Pages/alljobspage.dart';
+import 'package:hyper_local_employee/models/job_post_model.dart';
+import 'package:hyper_local_employee/services/api_service.dart';
+import 'package:hyper_local_employee/services/user_session.dart';
+import 'package:hyper_local_employee/utils/app-colorpage.dart';
 
 class EmployeeHiringDashboardPage extends StatefulWidget {
   const EmployeeHiringDashboardPage({super.key});
@@ -12,20 +17,344 @@ class _EmployeeHiringDashboardPageState extends State<EmployeeHiringDashboardPag
   String _selectedRange = "This Month";
   final List<String> _ranges = const ["This Week", "This Month", "This Year"];
 
-  // ── Applications trend data (x label, y value) ──
-  final List<_TrendPoint> _trend = const [
-    _TrendPoint("01 May", 42),
-    _TrendPoint("08 May", 68),
-    _TrendPoint("15 May", 105),
-    _TrendPoint("23 May", 78),
-    _TrendPoint("29 May", 120),
-  ];
+  bool _isLoading = false;
+  int _totalViews = 0;
+  int _applicationsCount = 0;
+  int _interviewsCount = 0;
+  int _hiredCount = 0;
 
-  final List<_JobItem> _topJobs = const [
-    _JobItem(title: "Sales Executive", applications: 88),
-    _JobItem(title: "Field Technician", applications: 34),
-    _JobItem(title: "Customer Support", applications: 21),
-  ];
+  // Applications trend data (x label, y value)
+  List<_TrendPoint> _trend = const [];
+
+  // Top performing jobs
+  List<_JobItem> _topJobs = const [];
+
+  // Raw fetched data for the logged-in employer
+  List<Map<String, dynamic>> _rawApplications = [];
+  List<Map<String, dynamic>> _rawInvitations = [];
+  List<JobPostModel> _rawJobs = [];
+
+  @override
+  void initState() {
+    super.initState();
+    if (UserSession.currentEmployee == null) {
+      UserSession.init().then((_) {
+        if (mounted) {
+          _loadDashboardData();
+        }
+      });
+    } else {
+      _loadDashboardData();
+    }
+    UserSession.userNotifier.addListener(_onSessionChanged);
+  }
+
+  void _onSessionChanged() {
+    if (mounted) {
+      _loadDashboardData();
+    }
+  }
+
+  @override
+  void dispose() {
+    UserSession.userNotifier.removeListener(_onSessionChanged);
+    super.dispose();
+  }
+
+  Future<void> _loadDashboardData() async {
+    if (mounted) setState(() => _isLoading = true);
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      var token = prefs.getString('auth_token');
+      if (token == null || token.isEmpty) {
+        token = UserSession.token;
+      }
+
+      int? employerId = prefs.getInt('employer_id');
+      if (employerId == null) {
+        final raw = prefs.get('employer_id');
+        if (raw != null) employerId = int.tryParse(raw.toString());
+      }
+      employerId ??= prefs.getInt('employee_id');
+      if (employerId == null) {
+        final raw = prefs.get('employee_id');
+        if (raw != null) employerId = int.tryParse(raw.toString());
+      }
+      if (employerId == null && UserSession.currentEmployee != null) {
+        employerId = UserSession.currentEmployee!.id;
+      }
+      employerId ??= await UserSession.getEmployerId();
+
+      List<JobPostModel> jobs = [];
+      List<Map<String, dynamic>> applications = [];
+      List<Map<String, dynamic>> invitations = [];
+
+      await Future.wait([
+        // 1. Fetch employer's jobs
+        () async {
+          try {
+            if (token != null && token.isNotEmpty) {
+              jobs = await ApiService.fetchMyJobPosts(token);
+            }
+          } catch (e) {
+            debugPrint('[HiringDashboard] Error fetching jobs: $e');
+          }
+        }(),
+
+        // 2. Fetch employer's applications
+        () async {
+          try {
+            if (employerId != null && employerId > 0) {
+              applications = await ApiService.getEmployerApplications(employerId);
+            }
+          } catch (e) {
+            debugPrint('[HiringDashboard] Error fetching applications: $e');
+          }
+        }(),
+
+        // 3. Fetch employer's interview invitations
+        () async {
+          try {
+            if (employerId != null && employerId > 0) {
+              invitations = await ApiService.getEmployerInvitations(employerId);
+            }
+          } catch (e) {
+            debugPrint('[HiringDashboard] Error fetching invitations: $e');
+          }
+        }(),
+      ]);
+
+      if (mounted) {
+        _rawJobs = jobs;
+        _rawApplications = applications;
+        _rawInvitations = invitations;
+        _applyFilter();
+      }
+    } catch (e) {
+      debugPrint('[HiringDashboard] Error loading data: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  void _applyFilter() {
+    final now = DateTime.now();
+    DateTime start;
+    DateTime end;
+
+    switch (_selectedRange) {
+      case "This Week":
+        // Monday of current week 00:00:00 to Sunday 23:59:59.999
+        final monday = now.subtract(Duration(days: now.weekday - 1));
+        start = DateTime(monday.year, monday.month, monday.day);
+        final sunday = now.add(Duration(days: 7 - now.weekday));
+        end = DateTime(sunday.year, sunday.month, sunday.day, 23, 59, 59, 999);
+        break;
+      case "This Year":
+        // Jan 1 to Dec 31
+        start = DateTime(now.year, 1, 1);
+        end = DateTime(now.year, 12, 31, 23, 59, 59, 999);
+        break;
+      case "This Month":
+      default:
+        // 1st of month to last millisecond of month
+        start = DateTime(now.year, now.month, 1);
+        final nextMonth = DateTime(now.year, now.month + 1, 1);
+        end = nextMonth.subtract(const Duration(milliseconds: 1));
+        break;
+    }
+
+    // Filter applications within selected date range
+    final filteredApps = _rawApplications.where((app) {
+      final dt = _parseDate(app['applied_at'] ?? app['created_at']);
+      if (dt == null) return false;
+      return !dt.isBefore(start) && !dt.isAfter(end);
+    }).toList();
+
+    // Filter interviews within selected date range
+    final filteredInvs = _rawInvitations.where((inv) {
+      final dt = _parseDate(inv['interview_date'] ?? inv['sent_at'] ?? inv['created_at']);
+      if (dt == null) return false;
+      return !dt.isBefore(start) && !dt.isAfter(end);
+    }).toList();
+
+    // Summary counts
+    final appCount = filteredApps.length;
+    final intCount = filteredInvs.length;
+
+    // Hired: applications in period with status 'hired', 'selected', or 'offer_accepted'
+    final hiredCount = filteredApps.where((app) {
+      final status = (app['application_status'] ?? '').toString().toLowerCase().trim();
+      return status == 'hired' || status == 'selected' || status == 'offer_accepted';
+    }).length;
+
+    // Total Views: Not tracked by database/backend -> 0 dynamically without fabricating
+    const viewsCount = 0;
+
+    // Trend points grouped by date
+    final trendPoints = _buildTrendPoints(filteredApps, start, end, now);
+
+    // Top performing jobs
+    final topJobs = _buildTopJobs(filteredApps);
+
+    setState(() {
+      _totalViews = viewsCount;
+      _applicationsCount = appCount;
+      _interviewsCount = intCount;
+      _hiredCount = hiredCount;
+      _trend = trendPoints;
+      _topJobs = topJobs;
+    });
+  }
+
+  List<_TrendPoint> _buildTrendPoints(
+    List<Map<String, dynamic>> apps,
+    DateTime start,
+    DateTime end,
+    DateTime now,
+  ) {
+    final points = <_TrendPoint>[];
+
+    if (_selectedRange == "This Week") {
+      // 7 days: Monday to Sunday
+      final monday = now.subtract(Duration(days: now.weekday - 1));
+      final dayLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+      for (int i = 0; i < 7; i++) {
+        final d = monday.add(Duration(days: i));
+        final dayStart = DateTime(d.year, d.month, d.day);
+        final dayEnd = DateTime(d.year, d.month, d.day, 23, 59, 59, 999);
+        final count = apps.where((a) {
+          final dt = _parseDate(a['applied_at'] ?? a['created_at']);
+          return dt != null && !dt.isBefore(dayStart) && !dt.isAfter(dayEnd);
+        }).length;
+        points.add(_TrendPoint(dayLabels[i], count.toDouble()));
+      }
+    } else if (_selectedRange == "This Year") {
+      // 6 bi-monthly intervals: Jan-Feb, Mar-Apr, May-Jun, Jul-Aug, Sep-Oct, Nov-Dec
+      final monthLabels = ["Feb", "Apr", "Jun", "Aug", "Oct", "Dec"];
+      for (int i = 0; i < 6; i++) {
+        final startMonth = i * 2 + 1;
+        final endMonth = i * 2 + 2;
+        final intervalStart = DateTime(now.year, startMonth, 1);
+        final nextM = DateTime(now.year, endMonth + 1, 1);
+        final intervalEnd = nextM.subtract(const Duration(milliseconds: 1));
+        final count = apps.where((a) {
+          final dt = _parseDate(a['applied_at'] ?? a['created_at']);
+          return dt != null && !dt.isBefore(intervalStart) && !dt.isAfter(intervalEnd);
+        }).length;
+        points.add(_TrendPoint(monthLabels[i], count.toDouble()));
+      }
+    } else {
+      // "This Month": 5 checkpoints across the month matching the original mockup UI ("01 May", "08 May", "15 May", "23 May", "29 May")
+      final monthStr = _monthShort(now.month);
+      final lastDay = DateTime(now.year, now.month + 1, 0).day;
+
+      final intervals = [
+        [1, 7, "01 $monthStr"],
+        [8, 14, "08 $monthStr"],
+        [15, 21, "15 $monthStr"],
+        [22, 28, "22 $monthStr"],
+        [29, lastDay, "${lastDay.toString().padLeft(2, '0')} $monthStr"],
+      ];
+
+      for (final interval in intervals) {
+        final d1 = interval[0] as int;
+        final d2 = interval[1] as int;
+        final label = interval[2] as String;
+        final intervalStart = DateTime(now.year, now.month, d1);
+        final intervalEnd = DateTime(now.year, now.month, d2, 23, 59, 59, 999);
+
+        final count = apps.where((a) {
+          final dt = _parseDate(a['applied_at'] ?? a['created_at']);
+          return dt != null && !dt.isBefore(intervalStart) && !dt.isAfter(intervalEnd);
+        }).length;
+
+        points.add(_TrendPoint(label, count.toDouble()));
+      }
+    }
+
+    return points;
+  }
+
+  List<_JobItem> _buildTopJobs(List<Map<String, dynamic>> periodApps) {
+    final Map<int, int> appCountByJobId = {};
+    final Map<int, String> jobTitleById = {};
+
+    // Populate from employer's jobs list
+    for (final j in _rawJobs) {
+      if (j.id != null) {
+        jobTitleById[j.id!] = (j.jobTitle != null && j.jobTitle!.trim().isNotEmpty)
+            ? j.jobTitle!.trim()
+            : "Job #${j.id}";
+        appCountByJobId[j.id!] = 0;
+      }
+    }
+
+    // Count applications in the selected period (or from all employer applications if period is empty)
+    final appsToCount = periodApps.isNotEmpty ? periodApps : _rawApplications;
+
+    for (final a in appsToCount) {
+      final rawId = a['job_post_id'] ?? a['job_id'];
+      final jobId = int.tryParse(rawId?.toString() ?? '');
+      if (jobId != null) {
+        appCountByJobId[jobId] = (appCountByJobId[jobId] ?? 0) + 1;
+        if (!jobTitleById.containsKey(jobId)) {
+          final title = (a['job_title'] ?? 'Job #$jobId').toString().trim();
+          if (title.isNotEmpty) {
+            jobTitleById[jobId] = title;
+          }
+        }
+      }
+    }
+
+    final list = <_JobItem>[];
+    appCountByJobId.forEach((jobId, count) {
+      list.add(_JobItem(
+        title: jobTitleById[jobId] ?? "Job #$jobId",
+        applications: count,
+      ));
+    });
+
+    // Sort descending by applications count
+    list.sort((a, b) => b.applications.compareTo(a.applications));
+
+    // Limit to top 5 jobs for clean display
+    return list.take(5).toList();
+  }
+
+  static DateTime? _parseDate(dynamic val) {
+    if (val == null) return null;
+    if (val is DateTime) return val;
+    return DateTime.tryParse(val.toString())?.toLocal();
+  }
+
+  static String _monthShort(int m) {
+    const months = [
+      "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+    ];
+    if (m >= 1 && m <= 12) return months[m - 1];
+    return "";
+  }
+
+  String _formatNumber(int number) {
+    if (number >= 1000) {
+      final str = number.toString();
+      final reg = RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))');
+      return str.replaceAllMapped(reg, (Match m) => '${m[1]},');
+    }
+    return number.toString();
+  }
+
+  String _formatHired(int number) {
+    if (number < 10) {
+      return number.toString().padLeft(2, '0');
+    }
+    return _formatNumber(number);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -54,7 +383,7 @@ class _EmployeeHiringDashboardPageState extends State<EmployeeHiringDashboardPag
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                 decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.18),
+                  color: Colors.white.withValues(alpha: 0.18),
                   borderRadius: BorderRadius.circular(20),
                 ),
                 child: DropdownButtonHideUnderline(
@@ -71,7 +400,10 @@ class _EmployeeHiringDashboardPageState extends State<EmployeeHiringDashboardPag
                         .map((r) => DropdownMenuItem(value: r, child: Text(r)))
                         .toList(),
                     onChanged: (val) {
-                      if (val != null) setState(() => _selectedRange = val);
+                      if (val != null) {
+                        setState(() => _selectedRange = val);
+                        _applyFilter();
+                      }
                     },
                   ),
                 ),
@@ -80,146 +412,171 @@ class _EmployeeHiringDashboardPageState extends State<EmployeeHiringDashboardPag
           ),
         ],
       ),
-      body: SingleChildScrollView(
-        physics: const BouncingScrollPhysics(),
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // ── Stat cards grid ──
-            Row(
-              children: [
-                Expanded(child: _buildStatCard("Total Views", "4,582")),
-                const SizedBox(width: 12),
-                Expanded(child: _buildStatCard("Applications", "156")),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(child: _buildStatCard("Interviews", "28")),
-                const SizedBox(width: 12),
-                Expanded(child: _buildStatCard("Hired", "08")),
-              ],
-            ),
-
-            const SizedBox(height: 26),
-
-            // ── Applications Trend ──
-            Text(
-              "Applications Trend",
-              style: TextStyle(
-                fontSize: 15.5,
-                fontWeight: FontWeight.w700,
-                color: AppColors.textPrimary,
+      body: RefreshIndicator(
+        onRefresh: _loadDashboardData,
+        color: AppColors.primary,
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(
+            parent: BouncingScrollPhysics(),
+          ),
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // ── Stat cards grid ──
+              Row(
+                children: [
+                  Expanded(child: _buildStatCard("Total Views", _formatNumber(_totalViews))),
+                  const SizedBox(width: 12),
+                  Expanded(child: _buildStatCard("Applications", _formatNumber(_applicationsCount))),
+                ],
               ),
-            ),
-            const SizedBox(height: 16),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.fromLTRB(12, 16, 16, 8),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: AppColors.border.withOpacity(0.6)),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(child: _buildStatCard("Interviews", _formatNumber(_interviewsCount))),
+                  const SizedBox(width: 12),
+                  Expanded(child: _buildStatCard("Hired", _formatHired(_hiredCount))),
+                ],
               ),
-              child: SizedBox(
-                height: 180,
-                child: CustomPaint(
-                  painter: _TrendChartPainter(points: _trend, lineColor: AppColors.primary),
-                  child: Container(),
+
+              const SizedBox(height: 26),
+
+              // ── Applications Trend ──
+              Text(
+                "Applications Trend",
+                style: TextStyle(
+                  fontSize: 15.5,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.textPrimary,
                 ),
               ),
-            ),
-
-            const SizedBox(height: 26),
-
-            // ── Top Performing Jobs ──
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  "Top Performing Jobs",
-                  style: TextStyle(
-                    fontSize: 15.5,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.textPrimary,
+              const SizedBox(height: 16),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.fromLTRB(12, 16, 16, 8),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: AppColors.border.withValues(alpha: 0.6)),
+                ),
+                child: SizedBox(
+                  height: 180,
+                  child: CustomPaint(
+                    painter: _TrendChartPainter(points: _trend, lineColor: AppColors.primary),
+                    child: Container(),
                   ),
                 ),
-                GestureDetector(
-                  onTap: () {
-                    // TODO: navigate to full jobs list
-                  },
-                  child: Text(
-                    "View All",
+              ),
+
+              const SizedBox(height: 26),
+
+              // ── Top Performing Jobs ──
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    "Top Performing Jobs",
                     style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: AppColors.primary,
+                      fontSize: 15.5,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.textPrimary,
                     ),
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Container(
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: AppColors.border.withOpacity(0.6)),
-              ),
-              child: Column(
-                children: List.generate(_topJobs.length, (index) {
-                  final job = _topJobs[index];
-                  final isLast = index == _topJobs.length - 1;
-                  final accent = AppColors.accents[index % AppColors.accents.length];
-                  final accentSoft = AppColors.accentsSoft[index % AppColors.accentsSoft.length];
-
-                  return Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-                    decoration: BoxDecoration(
-                      border: isLast
-                          ? null
-                          : Border(bottom: BorderSide(color: AppColors.divider)),
+                  GestureDetector(
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (_) => const AllJobsPage()),
+                      );
+                    },
+                    child: Text(
+                      "View All",
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.primary,
+                      ),
                     ),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 40,
-                          height: 40,
-                          decoration: BoxDecoration(
-                            color: accentSoft,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Icon(Icons.badge_outlined, color: accent, size: 20),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Container(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: AppColors.border.withValues(alpha: 0.6)),
+                ),
+                child: _topJobs.isEmpty
+                    ? Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
+                        child: Center(
                           child: Text(
-                            job.title,
+                            _isLoading ? "Loading jobs..." : "No job postings found",
                             style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: AppColors.textPrimary,
+                              fontSize: 13,
+                              color: AppColors.textSecondary,
+                              fontWeight: FontWeight.w500,
                             ),
                           ),
                         ),
-                        Text(
-                          "${job.applications} Applications",
-                          style: TextStyle(
-                            fontSize: 12.5,
-                            color: AppColors.textSecondary,
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                }),
-              ),
-            ),
+                      )
+                    : Column(
+                        children: List.generate(_topJobs.length, (index) {
+                          final job = _topJobs[index];
+                          final isLast = index == _topJobs.length - 1;
+                          final accent = AppColors.accents[index % AppColors.accents.length];
+                          final accentSoft = AppColors.accentsSoft[index % AppColors.accentsSoft.length];
 
-            const SizedBox(height: 20),
-          ],
+                          return Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                            decoration: BoxDecoration(
+                              border: isLast
+                                  ? null
+                                  : Border(bottom: BorderSide(color: AppColors.divider)),
+                            ),
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: 40,
+                                  height: 40,
+                                  decoration: BoxDecoration(
+                                    color: accentSoft,
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: Icon(Icons.badge_outlined, color: accent, size: 20),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Text(
+                                    job.title,
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w600,
+                                      color: AppColors.textPrimary,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                Text(
+                                  "${job.applications} Applications",
+                                  style: TextStyle(
+                                    fontSize: 12.5,
+                                    color: AppColors.textSecondary,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        }),
+                      ),
+              ),
+
+              const SizedBox(height: 20),
+            ],
+          ),
         ),
       ),
     );
@@ -231,7 +588,7 @@ class _EmployeeHiringDashboardPageState extends State<EmployeeHiringDashboardPag
       decoration: BoxDecoration(
         color: AppColors.scaffoldBackground,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppColors.border.withOpacity(0.6)),
+        border: Border.all(color: AppColors.border.withValues(alpha: 0.6)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -286,14 +643,43 @@ class _TrendChartPainter extends CustomPainter {
     final chartWidth = size.width - leftPadding;
     final chartHeight = size.height - bottomPadding - topPadding;
 
-    const double maxY = 150;
-    const List<double> yTicks = [0, 50, 100];
+    // Dynamically calculate maxY and yTicks based on actual data
+    final double maxVal = points.isEmpty
+        ? 0.0
+        : points.map((p) => p.value).reduce((a, b) => a > b ? a : b);
+
+    double maxY;
+    List<double> yTicks;
+
+    if (maxVal <= 0) {
+      maxY = 5;
+      yTicks = [0, 2, 4];
+    } else if (maxVal <= 4) {
+      maxY = 5;
+      yTicks = [0, 2, 4];
+    } else if (maxVal <= 10) {
+      maxY = 10;
+      yTicks = [0, 5, 10];
+    } else if (maxVal <= 25) {
+      maxY = 25;
+      yTicks = [0, 10, 20];
+    } else if (maxVal <= 50) {
+      maxY = 50;
+      yTicks = [0, 25, 50];
+    } else if (maxVal <= 100) {
+      maxY = 100;
+      yTicks = [0, 50, 100];
+    } else {
+      maxY = ((maxVal * 1.25) / 10).ceil() * 10.0;
+      final step = (maxY / 3).roundToDouble();
+      yTicks = [0, step, step * 2];
+    }
 
     final gridPaint = Paint()
       ..color = const Color(0xFFEEEEEE)
       ..strokeWidth = 1;
 
-    final labelStyle = TextStyle(color: const Color(0xFF9CA3AF), fontSize: 10);
+    final labelStyle = const TextStyle(color: Color(0xFF9CA3AF), fontSize: 10);
 
     // ── horizontal grid lines + y labels ──
     for (final tick in yTicks) {
@@ -317,7 +703,8 @@ class _TrendChartPainter extends CustomPainter {
     final offsets = <Offset>[];
     for (int i = 0; i < points.length; i++) {
       final x = leftPadding + dx * i;
-      final y = topPadding + chartHeight - (points[i].value / maxY) * chartHeight;
+      final clampedVal = points[i].value.clamp(0.0, maxY);
+      final y = topPadding + chartHeight - (clampedVal / maxY) * chartHeight;
       offsets.add(Offset(x, y));
     }
 
@@ -333,7 +720,7 @@ class _TrendChartPainter extends CustomPainter {
       ..shader = LinearGradient(
         begin: Alignment.topCenter,
         end: Alignment.bottomCenter,
-        colors: [lineColor.withOpacity(0.18), lineColor.withOpacity(0.0)],
+        colors: [lineColor.withValues(alpha: 0.18), lineColor.withValues(alpha: 0.0)],
       ).createShader(Rect.fromLTWH(0, topPadding, size.width, chartHeight));
     canvas.drawPath(fillPath, fillPaint);
 

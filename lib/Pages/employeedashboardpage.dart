@@ -22,7 +22,13 @@ import 'package:hyper_local_employee/Pages/employeerecruiterpage.dart';
 import 'package:hyper_local_employee/Pages/employeesettingpage.dart';
 import 'package:hyper_local_employee/Pages/employeewalkininterviewpage.dart';
 import 'package:hyper_local_employee/Splash/employeeloginpage.dart';
+import 'package:hyper_local_employee/models/employee_model.dart';
+import 'package:hyper_local_employee/services/api_service.dart';
+import 'package:hyper_local_employee/services/user_session.dart';
 import 'package:hyper_local_employee/utils/app-colorpage.dart';
+import 'package:hyper_local_employee/utils/company_profile_gate.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class TapScale extends StatefulWidget {
   final Widget child;
@@ -74,6 +80,23 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
   // Selected filter state
   final String _timeFilter = "This Month";
 
+  // Dynamic Dashboard Card Counts
+  int _activeJobsCount = 0;
+  int _totalApplicationsCount = 0;
+  int _newApplicationsCount = 0;
+  int _shortlistsCount = 0;
+  int _interviewsCount = 0;
+  bool _isLoadingCounts = false;
+
+  // Dynamic Overview Section Counts
+  int _overviewTotal = 0;
+  int _overviewNew = 0;
+  int _overviewShortlisted = 0;
+  int _overviewInterviews = 0;
+  int _overviewOffers = 0;
+  int _overviewHired = 0;
+  int _overviewOthers = 0;
+
   // Mock candidates database for local Nagpur search
   final List<Map<String, String>> _candidates = [
     {
@@ -116,6 +139,17 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
   @override
   void initState() {
     super.initState();
+    if (UserSession.currentEmployee == null) {
+      UserSession.init().then((_) {
+        if (mounted) {
+          setState(() {});
+          _loadDashboardCounts();
+        }
+      });
+    } else {
+      _loadDashboardCounts();
+    }
+    UserSession.userNotifier.addListener(_onUserSessionChanged);
     _searchController.addListener(() {
       setState(() {
         _searchQuery = _searchController.text;
@@ -128,8 +162,216 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
     });
   }
 
+  void _onUserSessionChanged() {
+    if (mounted) {
+      _loadDashboardCounts();
+    }
+  }
+
+  Future<void> _loadDashboardCounts() async {
+    if (_isLoadingCounts) return;
+    if (mounted) {
+      setState(() => _isLoadingCounts = true);
+    }
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      var token = prefs.getString('auth_token');
+      if (token == null || token.isEmpty) {
+        token = UserSession.token;
+      }
+
+      int? employerId = prefs.getInt('employer_id');
+      if (employerId == null) {
+        final raw = prefs.get('employer_id');
+        if (raw != null) employerId = int.tryParse(raw.toString());
+      }
+      employerId ??= prefs.getInt('employee_id');
+      if (employerId == null) {
+        final raw = prefs.get('employee_id');
+        if (raw != null) employerId = int.tryParse(raw.toString());
+      }
+      if (employerId == null && UserSession.currentEmployee != null) {
+        employerId = UserSession.currentEmployee!.id;
+      }
+      employerId ??= await UserSession.getEmployerId();
+
+      await Future.wait([
+        // 1. Active Jobs: Count of active/published jobs belonging to logged-in employer
+        () async {
+          try {
+            if (token != null && token.isNotEmpty) {
+              final jobs = await ApiService.fetchMyJobPosts(token);
+              final active = jobs.where((j) {
+                final st = j.status.toLowerCase().trim();
+                return st == 'active' || st == 'published' || st.isEmpty;
+              }).length;
+              if (mounted) {
+                setState(() => _activeJobsCount = active);
+              }
+            }
+          } catch (e) {
+            debugPrint('[Dashboard] Error fetching active jobs: $e');
+          }
+        }(),
+
+        // 2, 3, 5. Applications & Overview pipeline counts for logged-in employer's jobs
+        () async {
+          try {
+            if (employerId != null && employerId > 0) {
+              List<Map<String, dynamic>> apps = [];
+              List<Map<String, dynamic>> interviews = [];
+              List<Map<String, dynamic>> invitations = [];
+              List<Map<String, dynamic>> offerLetters = [];
+
+              await Future.wait([
+                () async {
+                  try {
+                    apps = await ApiService.getEmployerApplications(employerId!);
+                  } catch (e) {
+                    debugPrint('[Dashboard] Error fetching applications: $e');
+                  }
+                }(),
+                () async {
+                  try {
+                    interviews = await ApiService.getUpcomingInterviews();
+                  } catch (e) {
+                    debugPrint('[Dashboard] Error fetching upcoming interviews: $e');
+                  }
+                }(),
+                () async {
+                  try {
+                    invitations = await ApiService.getEmployerInvitations(employerId!);
+                  } catch (e) {
+                    debugPrint('[Dashboard] Error fetching invitations: $e');
+                  }
+                }(),
+                () async {
+                  try {
+                    offerLetters = await ApiService.getOfferLetters();
+                  } catch (e) {
+                    debugPrint('[Dashboard] Error fetching offer letters: $e');
+                  }
+                }(),
+              ]);
+
+              final activeInterviewAppIds = <String>{};
+              for (final inv in interviews) {
+                final id = inv['application_id']?.toString();
+                if (id != null && id.isNotEmpty) activeInterviewAppIds.add(id);
+              }
+              for (final inv in invitations) {
+                final intSt = (inv['interview_status'] ?? '').toString().toLowerCase().trim();
+                final invSt = (inv['invitation_status'] ?? '').toString().toLowerCase().trim();
+                if (intSt == 'scheduled' || invSt == 'pending' || invSt == 'accepted') {
+                  final id = inv['application_id']?.toString();
+                  if (id != null && id.isNotEmpty) activeInterviewAppIds.add(id);
+                }
+              }
+
+              final activeOfferAppIds = <String>{};
+              for (final ol in offerLetters) {
+                final st = (ol['status'] ?? '').toString().toLowerCase().trim();
+                if (st != 'declined') {
+                  final id = ol['application_id']?.toString();
+                  if (id != null && id.isNotEmpty) activeOfferAppIds.add(id);
+                }
+              }
+
+              final int total = apps.length;
+              int cardShortlisted = 0;
+              int cardNewApps = 0;
+
+              int overviewNew = 0;
+              int overviewShortlisted = 0;
+              int overviewInterviews = 0;
+              int overviewOffers = 0;
+              int overviewHired = 0;
+              int overviewOthers = 0;
+
+              for (final app in apps) {
+                final appId = (app['application_id'] ?? app['id'])?.toString();
+                final st = (app['application_status'] ?? '').toString().toLowerCase().trim();
+                final intSt = (app['interview_status'] ?? '').toString().toLowerCase().trim();
+                final offSt = (app['offer_status'] ?? '').toString().toLowerCase().trim();
+
+                // Summary card logic (preserved)
+                if (st == 'shortlisted') {
+                  cardShortlisted++;
+                } else if (st == 'applied' || st == 'new' || (st != 'rejected' && st != 'withdrawn')) {
+                  cardNewApps++;
+                }
+
+                // Overview Dynamic Categories (funnel stage precedence prevents double-counting):
+                // 1. Hired: 'hired', 'selected', 'offer_accepted', or accepted offer
+                if (st == 'hired' || st == 'selected' || st == 'offer_accepted' || offSt == 'accepted') {
+                  overviewHired++;
+                }
+                // 2. Offers: 'offer_letter', 'offer', 'offer_pending', or active offer letter record
+                else if (st == 'offer_letter' ||
+                    st == 'offer' ||
+                    st == 'offer_pending' ||
+                    (offSt.isNotEmpty && offSt != 'declined') ||
+                    (appId != null && activeOfferAppIds.contains(appId))) {
+                  overviewOffers++;
+                }
+                // 3. Interviews: 'interview', interview_status active ('scheduled', 'rescheduled'), or active interview record
+                else if (st == 'interview' ||
+                    intSt == 'scheduled' ||
+                    intSt == 'rescheduled' ||
+                    (appId != null && activeInterviewAppIds.contains(appId))) {
+                  overviewInterviews++;
+                }
+                // 4. Shortlisted: 'shortlisted'
+                else if (st == 'shortlisted') {
+                  overviewShortlisted++;
+                }
+                // 5. New: 'applied', 'new', or initial default status
+                else if (st == 'applied' || st == 'new' || st.isEmpty) {
+                  overviewNew++;
+                }
+                // 6. Others: clearly defined remaining statuses: 'rejected', 'withdrawn', 'under_review', etc.
+                else {
+                  overviewOthers++;
+                }
+              }
+
+              if (mounted) {
+                setState(() {
+                  // Recruitment Summary Cards (preserved)
+                  _totalApplicationsCount = total;
+                  _newApplicationsCount = cardNewApps;
+                  _shortlistsCount = cardShortlisted;
+                  _interviewsCount = interviews.length;
+
+                  // Overview Dynamic Data
+                  _overviewTotal = total;
+                  _overviewNew = overviewNew;
+                  _overviewShortlisted = overviewShortlisted;
+                  _overviewInterviews = overviewInterviews;
+                  _overviewOffers = overviewOffers;
+                  _overviewHired = overviewHired;
+                  _overviewOthers = overviewOthers;
+                });
+              }
+            }
+          } catch (e) {
+            debugPrint('[Dashboard] Error fetching applications and overview metrics: $e');
+          }
+        }(),
+      ]);
+    } catch (e) {
+      debugPrint('[Dashboard] Error loading dashboard counts: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _isLoadingCounts = false);
+      }
+    }
+  }
+
   @override
   void dispose() {
+    UserSession.userNotifier.removeListener(_onUserSessionChanged);
     _searchController.dispose();
     _searchFocusNode.dispose();
     super.dispose();
@@ -180,39 +422,41 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
                 Expanded(
                   child: Stack(
                     children: [
-                      SingleChildScrollView(
-                        physics: const BouncingScrollPhysics(),
-        padding: EdgeInsets.fromLTRB(
-          isWideScreen ? 24 : 12,
-          isWideScreen ? 12 : 8,
-          isWideScreen ? 24 : 12,
-          isWideScreen ? 12 : 16, // Reduced bottom spacing
-        ),
-                        child: isSearching
-                            ? _buildSearchResults(filteredCandidates)
-                            : Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  if (isWideScreen)
-                                    _buildWelcomeAndSubscriptionHeader(
-                                      isWideScreen,
-                                    )
-                                  else
-                                    _buildSubscriptionHeaderMobileOnly(),
-                                  const SizedBox(
-                                    height: 5,
-                                  ), // Even tighter spacing
-                                  _buildKPICardsGrid(isWideScreen),
-                                  const SizedBox(
-                                    height: 5,
-                                  ), // Even tighter spacing
-                                  _buildQuickActionsSection(isWideScreen),
-                                  const SizedBox(
-                                    height: 5,
-                                  ), // Even tighter spacing
-                                  _buildRecruitmentSummarySection(isWideScreen),
-                                ],
-                              ),
+                      RefreshIndicator(
+                        onRefresh: _loadDashboardCounts,
+                        color: AppColors.primary,
+                        child: SingleChildScrollView(
+                          physics: const AlwaysScrollableScrollPhysics(
+                            parent: BouncingScrollPhysics(),
+                          ),
+                          padding: EdgeInsets.fromLTRB(
+                            isWideScreen ? 24 : 12,
+                            isWideScreen ? 12 : 8,
+                            isWideScreen ? 24 : 12,
+                            isWideScreen ? 12 : 16, // Reduced bottom spacing
+                          ),
+                          child: isSearching
+                              ? _buildSearchResults(filteredCandidates)
+                              : Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    if (isWideScreen)
+                                      _buildWelcomeAndSubscriptionHeader(
+                                        isWideScreen,
+                                      )
+                                    else
+                                      _buildSubscriptionHeaderMobileOnly(),
+                                    const SizedBox(height: 8),
+                                    _buildKPICardsGrid(isWideScreen),
+                                    const SizedBox(height: 8),
+                                    _buildQuickActionsSection(isWideScreen),
+                                    const SizedBox(
+                                      height: 5,
+                                    ), // Even tighter spacing
+                                    _buildRecruitmentSummarySection(isWideScreen),
+                                  ],
+                                ),
+                        ),
                       ),
                     ],
                   ),
@@ -740,19 +984,33 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
           ),
           const SizedBox(height: 14),
           // User Greeting below top row
-          Row(
-            children: [
-              Text(
-                "Hi, Rahul",
-                style: GoogleFonts.poppins(
-                  color: Colors.white,
-                  fontSize: 16.5,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(width: 4),
-              const Text('👋', style: TextStyle(fontSize: 15)),
-            ],
+          ValueListenableBuilder<Employee?>(
+            valueListenable: UserSession.userNotifier,
+            builder: (context, emp, _) {
+              final String employerName = (emp != null && emp.fullName.trim().isNotEmpty)
+                  ? emp.fullName.trim()
+                  : (UserSession.userName.isNotEmpty
+                      ? UserSession.userName
+                      : 'Employer');
+              return Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      "Hi, $employerName",
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.poppins(
+                        color: Colors.white,
+                        fontSize: 16.5,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  const Text('👋', style: TextStyle(fontSize: 15)),
+                ],
+              );
+            },
           ),
           const SizedBox(height: 14),
           Align(
@@ -955,19 +1213,35 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
             ],
           ),
           const SizedBox(height: 1),
-          Row(
-            children: [
-              Text(
-                "Hi, TechNova Solutions!",
-                style: GoogleFonts.poppins(
-                  fontSize: 14.5,
-                  color: AppColors.primaryDeep,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              const SizedBox(width: 4),
-              const Text('👋', style: TextStyle(fontSize: 13)),
-            ],
+          ValueListenableBuilder<Employee?>(
+            valueListenable: UserSession.userNotifier,
+            builder: (context, emp, _) {
+              final String employerName = (emp != null && emp.fullName.trim().isNotEmpty)
+                  ? emp.fullName.trim()
+                  : (UserSession.userName.isNotEmpty
+                      ? UserSession.userName
+                      : (UserSession.companyName.isNotEmpty
+                          ? UserSession.companyName
+                          : 'Employer'));
+              return Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      "Hi, $employerName!",
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.poppins(
+                        fontSize: 14.5,
+                        color: AppColors.primaryDeep,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  const Text('👋', style: TextStyle(fontSize: 13)),
+                ],
+              );
+            },
           ),
 
           const SizedBox(height: 1),
@@ -1115,12 +1389,25 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
     }
   }
 
-  // ── KPI CARDS GRID (SMALLER & COMPACT) ──
+  // ── KPI CARDS GRID (4 CARDS PER ROW, WIDER & COMPACT HEIGHT) ──
   Widget _buildKPICardsGrid(bool isWideScreen) {
+    final double screenWidth = MediaQuery.of(context).size.width;
+    final bool isCompact = screenWidth <= 600;
+    final double childAspectRatio;
+    if (isWideScreen) {
+      childAspectRatio = 2.45; // Wider and lower height for desktop
+    } else if (screenWidth > 600) {
+      childAspectRatio = 1.90; // Balanced wide layout for tablet
+    } else if (screenWidth > 380) {
+      childAspectRatio = 1.14; // Wider with less height for mobile
+    } else {
+      childAspectRatio = 1.06; // Compact wide for smaller phones
+    }
+
     final kpis = [
       {
         'title': 'Active Jobs',
-        'count': 12,
+        'count': _activeJobsCount,
         'icon': Icons.work_rounded,
         'color': AppColors.primary,
         'trend': '↑ 2 last week',
@@ -1128,7 +1415,7 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
       },
       {
         'title': 'Total Applications',
-        'count': 152,
+        'count': _totalApplicationsCount,
         'icon': Icons.description_rounded,
         'color': Colors.blue,
         'trend': '↑ 18% last week',
@@ -1136,7 +1423,7 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
       },
       {
         'title': 'New Applications',
-        'count': 48,
+        'count': _newApplicationsCount,
         'icon': Icons.assignment_late_rounded,
         'color': AppColors.coral,
         'trend': '↑ 18% last week',
@@ -1144,7 +1431,7 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
       },
       {
         'title': 'Shortlisted Candidates',
-        'count': 15,
+        'count': _shortlistsCount,
         'icon': Icons.fact_check_rounded,
         'color': AppColors.mint,
         'trend': '↑ 10% last week',
@@ -1152,7 +1439,7 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
       },
       {
         'title': 'Interviews Today',
-        'count': 4,
+        'count': _interviewsCount,
         'icon': Icons.calendar_month_rounded,
         'color': AppColors.pink,
         'trend': '↑ 1 yesterday',
@@ -1190,12 +1477,10 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
       physics: const NeverScrollableScrollPhysics(),
       itemCount: kpis.length,
       gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 4, // 4 cards per row on mobile & desktop
-        crossAxisSpacing: isWideScreen ? 6 : 4, // kami kela (10/6 -> 6/4)
-        mainAxisSpacing: isWideScreen ? 6 : 4, // kami kela
-        childAspectRatio: isWideScreen
-            ? 2.6
-            : 1.15, // Aspect ratio adjusted for narrower 4-column layout with tight gap
+        crossAxisCount: 4, // Exactly 4 cards per row
+        crossAxisSpacing: isWideScreen ? 12 : (isCompact ? 5 : 8),
+        mainAxisSpacing: isWideScreen ? 10 : 6,
+        childAspectRatio: childAspectRatio,
       ),
       itemBuilder: (context, index) {
         final kpi = kpis[index];
@@ -1206,6 +1491,8 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
           color: kpi['color'] as Color,
           trend: kpi['trend'] as String,
           isTrendPositive: kpi['isTrendPositive'] as bool?,
+          isCompact: isCompact,
+          isWideScreen: isWideScreen,
         );
       },
     );
@@ -1218,38 +1505,44 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
     required Color color,
     required String trend,
     required bool? isTrendPositive,
+    required bool isCompact,
+    required bool isWideScreen,
   }) {
     return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 6,
-        vertical: 4,
-      ), // Tighter padding for a smaller card
+      padding: EdgeInsets.symmetric(
+        horizontal: isCompact ? 6 : (isWideScreen ? 12 : 8),
+        vertical: isCompact ? 6 : (isWideScreen ? 10 : 8),
+      ),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(8), // Sleeker round corners
-        border: Border.all(color: AppColors.border, width: 0.6),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.border, width: 0.8),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.01),
-            blurRadius: 3,
-            offset: const Offset(0, 1),
+            color: Colors.black.withOpacity(0.02),
+            blurRadius: 4,
+            offset: const Offset(0, 1.5),
           ),
         ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.start, // Align to top/start to reduce gaps
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Row(
             children: [
               Container(
-                width: 16,
-                height: 16,
+                width: isWideScreen ? 26 : (isCompact ? 19 : 22),
+                height: isWideScreen ? 26 : (isCompact ? 19 : 22),
                 decoration: BoxDecoration(
-                  color: color.withOpacity(0.08),
-                  borderRadius: BorderRadius.circular(4),
+                  color: color.withOpacity(0.10),
+                  borderRadius: BorderRadius.circular(5),
                 ),
-                child: Icon(icon, color: color, size: 8),
+                child: Icon(
+                  icon,
+                  color: color,
+                  size: isWideScreen ? 14 : (isCompact ? 11 : 12),
+                ),
               ),
               const SizedBox(width: 4),
               Expanded(
@@ -1259,46 +1552,48 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
                   overflow: TextOverflow.ellipsis,
                   style: GoogleFonts.poppins(
                     color: AppColors.textSecondary,
-                    fontSize: 7.5,
+                    fontSize: isWideScreen ? 11.5 : (isCompact ? 8.8 : 9.5),
                     fontWeight: FontWeight.w600,
                   ),
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 3), // Controlled small gap between Title and Count
-          TweenAnimationBuilder<int>(
-            tween: IntTween(begin: 0, end: count),
-            duration: const Duration(milliseconds: 600),
-            curve: Curves.easeOut,
-            builder: (context, val, _) {
-              return Text(
-                val.toString(),
-                style: GoogleFonts.poppins(
-                  fontSize: 12.5, // Smaller count size
-                  fontWeight: FontWeight.bold,
-                  color: AppColors.textPrimary,
-                ),
-              );
-            },
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 1.0),
+            child: TweenAnimationBuilder<int>(
+              tween: IntTween(begin: 0, end: count),
+              duration: const Duration(milliseconds: 600),
+              curve: Curves.easeOut,
+              builder: (context, val, _) {
+                return Text(
+                  val.toString(),
+                  style: GoogleFonts.poppins(
+                    fontSize: isWideScreen ? 21.0 : (isCompact ? 16.5 : 18.0),
+                    fontWeight: FontWeight.bold,
+                    color: AppColors.textPrimary,
+                    height: 1.05,
+                  ),
+                );
+              },
+            ),
           ),
-          const SizedBox(height: 3), // Controlled small gap between Count and Trend
           Row(
             children: [
               if (isTrendPositive == true) ...[
-                const Icon(
+                Icon(
                   Icons.arrow_upward_rounded,
                   color: Colors.green,
-                  size: 7,
+                  size: isCompact ? 9 : 11,
                 ),
-                const SizedBox(width: 1),
+                const SizedBox(width: 1.5),
               ] else if (isTrendPositive == false) ...[
-                const Icon(
+                Icon(
                   Icons.arrow_downward_rounded,
                   color: Colors.redAccent,
-                  size: 7,
+                  size: isCompact ? 9 : 11,
                 ),
-                const SizedBox(width: 1),
+                const SizedBox(width: 1.5),
               ],
               Expanded(
                 child: isTrendPositive == null
@@ -1314,30 +1609,36 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Text(
-                              trend,
-                              style: GoogleFonts.poppins(
-                                color: AppColors.primary,
-                                fontSize: 7.0,
-                                fontWeight: FontWeight.bold,
+                            Flexible(
+                              child: Text(
+                                trend,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: GoogleFonts.poppins(
+                                  color: AppColors.primary,
+                                  fontSize: isWideScreen ? 9.5 : (isCompact ? 8.0 : 8.5),
+                                  fontWeight: FontWeight.bold,
+                                ),
                               ),
                             ),
-                            const SizedBox(width: 1),
-                            const Icon(
+                            const SizedBox(width: 2),
+                            Icon(
                               Icons.arrow_forward_rounded,
                               color: AppColors.primary,
-                              size: 6,
+                              size: isCompact ? 8 : 9,
                             ),
                           ],
                         ),
                       )
                     : Text(
                         trend,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                         style: GoogleFonts.poppins(
                           color: isTrendPositive == true
                               ? Colors.green
                               : Colors.redAccent,
-                          fontSize: 7.0,
+                          fontSize: isWideScreen ? 9.5 : (isCompact ? 8.0 : 8.5),
                           fontWeight: FontWeight.w600,
                         ),
                       ),
@@ -1380,13 +1681,17 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
               icon: Icons.post_add_rounded,
               color: AppColors.primary,
               soft: const Color(0xFFDCE3FF),
-              onTap: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => const EmployeePostNewJobPage(),
-                  ),
-                );
+              onTap: () async {
+                final canProceed =
+                    await CompanyProfileGate.ensureProfileComplete(context);
+                if (canProceed && context.mounted) {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const EmployeePostNewJobPage(),
+                    ),
+                  );
+                }
               },
             ),
             _buildQuickActionCard(
@@ -1582,25 +1887,25 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
     children: [
       _buildMiniKPIItem(
         "Active Jobs",
-        12,
+        _activeJobsCount,
         AppColors.primary,
         AppColors.primary.withOpacity(0.04),
       ),
       _buildMiniKPIItem(
         "New Applications",
-        48,
+        _newApplicationsCount,
         AppColors.coral,
         AppColors.coralSoft.withOpacity(0.3),
       ),
       _buildMiniKPIItem(
         "Shortlisted",
-        15,
+        _shortlistsCount,
         AppColors.mint,
         AppColors.mintSoft.withOpacity(0.3),
       ),
       _buildMiniKPIItem(
         "Interviews Today",
-        4,
+        _interviewsCount,
         AppColors.pink,
         AppColors.pinkSoft.withOpacity(0.3),
       ),
@@ -1615,21 +1920,8 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
 ),
         const SizedBox(height: 14),
 
-        // ALWAYS Side-by-Side Charts (even on mobile)
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              flex: 4,
-              child: _buildDoughnutChartWidget(isMobile: !isWideScreen),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              flex: 5,
-              child: _buildLineChartWidget(isMobile: !isWideScreen),
-            ),
-          ],
-        ),
+        // Overview Section (Full Width)
+        _buildDoughnutChartWidget(isMobile: !isWideScreen),
 
         const SizedBox(height: 14),
         // Footer report banner
@@ -1749,18 +2041,20 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
 }
   Widget _buildDoughnutChartWidget({required bool isMobile}) {
     final segments = [
-      DoughnutChartSegment("New", 48, AppColors.coral),
-      DoughnutChartSegment("Shortlisted", 15, AppColors.mint),
-      DoughnutChartSegment("Interviews", 4, AppColors.pink),
-      DoughnutChartSegment("Offers", 5, Colors.amber),
-      DoughnutChartSegment("Hired", 8, Colors.teal),
-      DoughnutChartSegment("Others", 72, Colors.blue),
+      DoughnutChartSegment("New", _overviewNew.toDouble(), AppColors.coral),
+      DoughnutChartSegment("Shortlisted", _overviewShortlisted.toDouble(), AppColors.mint),
+      DoughnutChartSegment("Interviews", _overviewInterviews.toDouble(), AppColors.pink),
+      DoughnutChartSegment("Offers", _overviewOffers.toDouble(), Colors.amber),
+      DoughnutChartSegment("Hired", _overviewHired.toDouble(), Colors.teal),
+      DoughnutChartSegment("Others", _overviewOthers.toDouble(), Colors.blue),
     ];
 
-    final chartSize = isMobile ? 80.0 : 120.0;
+    final chartSize = isMobile ? 100.0 : 120.0;
+    final int total = _overviewTotal;
 
     return Container(
-      padding: EdgeInsets.all(isMobile ? 8 : 14),
+      width: double.infinity,
+      padding: EdgeInsets.all(isMobile ? 12 : 14),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(14),
@@ -1778,183 +2072,72 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
             ),
           ),
           const SizedBox(height: 10),
-          isMobile
-              ? Column(
-                  children: [
-                    SizedBox(
-                      width: chartSize,
-                      height: chartSize,
-                      child: CustomPaint(
-                        painter: _DoughnutChartPainter(
-                          segments: segments,
-                          isMobile: true,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Column(
-                      children: segments.take(4).map((seg) {
-                        final double pct = (seg.value / 152.0) * 100;
-                        return Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 2),
-                          child: Row(
-                            children: [
-                              Container(
-                                width: 6,
-                                height: 6,
-                                decoration: BoxDecoration(
-                                  color: seg.color,
-                                  shape: BoxShape.circle,
-                                ),
-                              ),
-                              const SizedBox(width: 4),
-                              Expanded(
-                                child: Text(
-                                  seg.label,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: GoogleFonts.poppins(
-                                    fontSize: 7.5,
-                                    color: AppColors.textSecondary,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                              Text(
-                                "${pct.toStringAsFixed(0)}%",
-                                style: GoogleFonts.poppins(
-                                  fontSize: 7.5,
-                                  color: AppColors.textPrimary,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ],
-                          ),
-                        );
-                      }).toList(),
-                    ),
-                  ],
-                )
-              : Row(
-                  children: [
-                    SizedBox(
-                      width: chartSize,
-                      height: chartSize,
-                      child: CustomPaint(
-                        painter: _DoughnutChartPainter(
-                          segments: segments,
-                          isMobile: false,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(
-                        children: segments.map((seg) {
-                          final double pct = (seg.value / 152.0) * 100;
-                          return Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 3),
-                            child: Row(
-                              children: [
-                                Container(
-                                  width: 7,
-                                  height: 7,
-                                  decoration: BoxDecoration(
-                                    color: seg.color,
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
-                                const SizedBox(width: 6),
-                                Expanded(
-                                  child: Text(
-                                    seg.label,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: GoogleFonts.poppins(
-                                      fontSize: 9,
-                                      color: AppColors.textSecondary,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ),
-                                Text(
-                                  "${seg.value.round()} (${pct.toStringAsFixed(0)}%)",
-                                  style: GoogleFonts.poppins(
-                                    fontSize: 9,
-                                    color: AppColors.textPrimary,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          );
-                        }).toList(),
-                      ),
-                    ),
-                  ],
-                ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildLineChartWidget({required bool isMobile}) {
-    return Container(
-      padding: EdgeInsets.all(isMobile ? 8 : 14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: AppColors.border, width: 0.8),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(
-                "Trend",
-                style: GoogleFonts.poppins(
-                  fontSize: 12,
-                  fontWeight: FontWeight.bold,
-                  color: AppColors.textPrimary,
+              SizedBox(
+                width: chartSize,
+                height: chartSize,
+                child: CustomPaint(
+                  painter: _DoughnutChartPainter(
+                    segments: segments,
+                    isMobile: isMobile,
+                    totalCount: total,
+                  ),
                 ),
               ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: AppColors.scaffoldBackground,
-                  borderRadius: BorderRadius.circular(4),
-                  border: Border.all(color: AppColors.border, width: 0.8),
-                ),
-                child: Row(
-                  children: [
-                    Text(
-                      "Weekly",
-                      style: GoogleFonts.poppins(
-                        fontSize: 8.5,
-                        fontWeight: FontWeight.w600,
-                        color: AppColors.textPrimary,
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  children: segments.map((seg) {
+                    final double pct = total > 0 ? (seg.value / total) * 100.0 : 0.0;
+                    String pctText;
+                    if (total == 0 || seg.value <= 0) {
+                      pctText = "0%";
+                    } else if (pct < 1.0) {
+                      pctText = "<1%";
+                    } else {
+                      pctText = "${pct.round()}%";
+                    }
+                    return Padding(
+                      padding: EdgeInsets.symmetric(vertical: isMobile ? 2.5 : 3),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 7,
+                            height: 7,
+                            decoration: BoxDecoration(
+                              color: seg.color,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              seg.label,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: GoogleFonts.poppins(
+                                fontSize: 9,
+                                color: AppColors.textSecondary,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          Text(
+                            "${seg.value.round()} ($pctText)",
+                            style: GoogleFonts.poppins(
+                              fontSize: 9,
+                              color: AppColors.textPrimary,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
                       ),
-                    ),
-                    const SizedBox(width: 1),
-                    const Icon(
-                      Icons.keyboard_arrow_down_rounded,
-                      color: AppColors.textSecondary,
-                      size: 10,
-                    ),
-                  ],
+                    );
+                  }).toList(),
                 ),
               ),
             ],
-          ),
-          const SizedBox(height: 10),
-          SizedBox(
-            height: isMobile
-                ? 90
-                : 130, // Shorter height for mobile side-by-side
-            width: double.infinity,
-            child: CustomPaint(painter: _LineChartPainter(isMobile: isMobile)),
           ),
         ],
       ),
@@ -2060,6 +2243,15 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
     );
   }
 
+  Future<void> _openWebsite() async {
+    final Uri uri = Uri.parse('https://webmediaindia.com');
+    try {
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      }
+    } catch (_) {}
+  }
+
   // ── SIDE DRAWER CONTENT (RESTORED OLD SIDEBAR) ──
   Widget _buildDrawerContent() {
     return SafeArea(
@@ -2104,32 +2296,50 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
                 ),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        'Amit Kadam',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: GoogleFonts.poppins(
-                          color: Colors.white,
-                          fontSize: 13,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-
-                      const SizedBox(height: 1),
-                      Text(
-                        'amit.kadam@gmail.com',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: GoogleFonts.poppins(
-                          color: Colors.white.withOpacity(0.85),
-                          fontSize: 9.5,
-                        ),
-                      ),
-                    ],
+                  child: ValueListenableBuilder<Employee?>(
+                    valueListenable: UserSession.userNotifier,
+                    builder: (context, emp, _) {
+                      final String employerName = (emp != null && emp.fullName.trim().isNotEmpty)
+                          ? emp.fullName.trim()
+                          : (UserSession.userName.isNotEmpty
+                              ? UserSession.userName
+                              : 'Employer');
+                      final String emailOrPhone = (emp != null && emp.email.trim().isNotEmpty)
+                          ? emp.email.trim()
+                          : (UserSession.userEmail.isNotEmpty
+                              ? UserSession.userEmail
+                              : (emp != null && emp.phone.trim().isNotEmpty
+                                  ? emp.phone.trim()
+                                  : UserSession.userPhone));
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            employerName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: GoogleFonts.poppins(
+                              color: Colors.white,
+                              fontSize: 13,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          if (emailOrPhone.isNotEmpty) ...[
+                            const SizedBox(height: 1),
+                            Text(
+                              emailOrPhone,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: GoogleFonts.poppins(
+                                color: Colors.white.withOpacity(0.85),
+                                fontSize: 9.5,
+                              ),
+                            ),
+                          ],
+                        ],
+                      );
+                    },
                   ),
                 ),
               ],
@@ -2356,7 +2566,9 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
             title: "Logout",
             iconColor: Colors.redAccent,
             textColor: Colors.redAccent,
-            onTap: () {
+            onTap: () async {
+              await UserSession.clearSession();
+              if (!mounted) return;
               Navigator.pushAndRemoveUntil(
                 context,
                 MaterialPageRoute(builder: (_) => const EmployeeLoginPage()),
@@ -2365,6 +2577,44 @@ class _EmployeeDashboardPageState extends State<EmployeeDashboardPage> {
             },
           ),
           const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.only(bottom: 15, top: 10),
+            child: Column(
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Text(
+                      "Made with ",
+                      style: TextStyle(fontSize: 14, color: Colors.black),
+                    ),
+                    const Text("❤️"),
+                    const Text(
+                      " by ",
+                      style: TextStyle(fontSize: 14, color: Colors.black),
+                    ),
+                    GestureDetector(
+                      onTap: _openWebsite,
+                      child: const Text(
+                        "WEBMEDIA",
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.black,
+                          decoration: TextDecoration.underline,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 5),
+                const Text(
+                  "Version 1.0 | UserId : 01",
+                  style: TextStyle(color: Colors.black45, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );
@@ -2441,8 +2691,13 @@ class DoughnutChartSegment {
 class _DoughnutChartPainter extends CustomPainter {
   final List<DoughnutChartSegment> segments;
   final bool isMobile;
+  final int totalCount;
 
-  _DoughnutChartPainter({required this.segments, required this.isMobile});
+  _DoughnutChartPainter({
+    required this.segments,
+    required this.isMobile,
+    required this.totalCount,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -2460,20 +2715,24 @@ class _DoughnutChartPainter extends CustomPainter {
       ..strokeWidth = strokeW
       ..strokeCap = StrokeCap.butt;
 
-    double startAngle = -pi / 2;
-
-    for (var segment in segments) {
-      if (segment.value <= 0) continue;
-      final sweepAngle = 2 * pi * (segment.value / total);
-      paint.color = segment.color;
-      canvas.drawArc(rect, startAngle, sweepAngle, false, paint);
-      startAngle += sweepAngle;
+    if (total <= 0) {
+      paint.color = AppColors.border.withOpacity(0.5);
+      canvas.drawCircle(center, radius - strokeW / 2 - 2, paint);
+    } else {
+      double startAngle = -pi / 2;
+      for (var segment in segments) {
+        if (segment.value <= 0) continue;
+        final sweepAngle = 2 * pi * (segment.value / total);
+        paint.color = segment.color;
+        canvas.drawArc(rect, startAngle, sweepAngle, false, paint);
+        startAngle += sweepAngle;
+      }
     }
 
-    // Central Title "152 Total"
+    // Central Title "$totalCount Total"
     final textPainter1 = TextPainter(
       text: TextSpan(
-        text: '152\n',
+        text: '$totalCount\n',
         style: GoogleFonts.poppins(
           color: AppColors.textPrimary,
           fontSize: isMobile ? 13 : 16,
@@ -2505,7 +2764,11 @@ class _DoughnutChartPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+  bool shouldRepaint(covariant _DoughnutChartPainter oldDelegate) {
+    return oldDelegate.totalCount != totalCount ||
+        oldDelegate.segments != segments ||
+        oldDelegate.isMobile != isMobile;
+  }
 }
 
 // ── CUSTOM LINE CHART PAINTER (COMPACT FOR MOBILE ROW) ──
@@ -2644,7 +2907,6 @@ class _LineChartPainter extends CustomPainter {
           style: GoogleFonts.poppins(
             color: AppColors.textSecondary,
             fontSize: isMobile ? 7.0 : 8.0,
-
             fontWeight: FontWeight.w600,
           ),
         ),

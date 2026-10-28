@@ -1,4 +1,4 @@
-package com.example.hyper_local_employee
+package com.employer.HiHR
 
 import io.flutter.embedding.android.FlutterActivity
 
